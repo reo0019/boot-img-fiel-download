@@ -1,195 +1,315 @@
 import os
 import time
+import tarfile
 import zipfile
+import asyncio
 import requests
+import shutil
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 
-# Replace 'YOUR_BOT_TOKEN' with the token from BotFather
 TOKEN = '7469030708:AAHu8ZEaYbGnAeTEoley1FB8XSg7NEPakWw'
 
-# Directory to store temporary files
 WORKING_DIR = "temp_files"
 if not os.path.exists(WORKING_DIR):
     os.makedirs(WORKING_DIR)
 
-# Global variable to store download state
 download_state = {}
+user_download_state = {}  # Store users who activated the download command
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a welcome message when the /start command is issued."""
-    await update.message.reply_text(
-        "Hi! Send me a URL to a Fastboot ROM (ZIP file), and I'll download it, extract the boot.img, and send it back to you. I'll also tell you how long it takes!"
+    user = update.effective_user
+    message = (
+        "------------------------\n"
+        f"🤖 Welcome, {user.first_name}!\n"
+        "------------------------\n"
+        "📌 This bot helps you download and extract boot.img from Fastboot ROMs.\n"
+        "\n"
+        "✅ Send a TGZ file URL to get started.\n"
+        "✅ Use /help to see all available commands.\n"
+        "\n"
+        "🚀 Let's begin!"
     )
 
+    await update.message.reply_text(f"{message}", parse_mode="HTML")
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = (
+        "------------------------\n"
+        " 🤖 <b>Bot Commands</b>\n"
+        "------------------------\n"
+        "✅ <b>/start</b> - Start the bot\n"
+        "✅ <b>/download</b> - Start downloading a ROM\n"
+        "✅ <b>/showfiles</b> - Show all stored files\n"
+        "✅ <b>/deletefiles</b> - Delete all stored files\n"
+        "✅ <b>/help</b> - Show this help menu\n"
+        "\n"
+        "📤 <b>How to use:</b>\n"
+        "\n"
+        " ❗ Note ❗: Only TGZ files supported \n"
+        "\n"
+        "1️⃣ Send the command <code>/download</code>\n"
+        "2️⃣ Send a <b>Fastboot ROM URL</b> (.tgz format)\n"
+        "3️⃣ Click '<b>Download</b>' to process it\n"
+        "4️⃣ Get the extracted <code>boot.img</code> file!\n"
+    )
+
+    await update.message.reply_text(message, parse_mode="HTML")
+
+
+async def download_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    user_download_state[chat_id] = True  # Mark the user as waiting for a URL
+    await update.message.reply_text(
+        "📥 Please send me the Fastboot ROM (TGZ file) URL to start downloading."
+    )
+
+
+async def handle_download_process(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(f"🔄 Processing URL: {url}\nDownloading...")
+
+    # Add your existing download function logic here
+
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the URL sent by the user and prompt for download options."""
-    url = update.message.text.strip()
     chat_id = update.effective_chat.id
 
-    # Check if the message is a valid URL
-    if not url.startswith("http"):
-        await update.message.reply_text("Please send a valid URL starting with http or https.")
+    # If the user didn't send /download first, ignore their URL
+    if chat_id not in user_download_state or not user_download_state[chat_id]:
+        return  # Ignore the message
+
+    url = update.message.text.strip()
+
+    # Validate URL
+    if not (url.startswith("http://") or url.startswith("https://")):
+        await update.message.reply_text("❌ Invalid URL. Please send a valid link starting with http:// or https://.")
         return
 
+    # Reset state after receiving a valid URL
+    user_download_state[chat_id] = False  
+
+    # Process the URL
+    # Add your download logic here
     try:
         response = requests.head(url, allow_redirects=True)
         response.raise_for_status()
-        file_size = int(response.headers.get('content-length', 0))
-        file_name = os.path.basename(url) if 'content-disposition' not in response.headers else response.headers['content-disposition'].split('filename=')[1].strip('"')
-        file_size_mb = file_size / (1024 * 1024) if file_size else 0
 
-        download_state[chat_id] = {'url': url, 'file_name': file_name, 'file_size': file_size, 'downloaded': 0}
+        # Get file size from headers
+        file_size = int(response.headers.get('content-length', 0))
+
+        # Extract file name from URL or content-disposition header
+        if 'content-disposition' in response.headers:
+            file_name = response.headers['content-disposition'].split('filename=')[-1].strip('"')
+        else:
+            file_name = os.path.basename(url) or "unknown_file"
+
+        # Convert file size dynamically
+        if file_size >= 1024 * 1024 * 1024:  # 1 GB or more
+            file_size_display = f"{file_size / (1024 * 1024 * 1024):.2f} GB"
+        elif file_size >= 1024 * 1024:  # 1 MB or more
+            file_size_display = f"{file_size / (1024 * 1024):.2f} MB"
+        elif file_size >= 1024:  # 1 KB or more
+            file_size_display = f"{file_size / 1024:.2f} KB"
+        else:
+            file_size_display = f"{file_size} Bytes" if file_size > 0 else "Unknown Size"
+
+        # Store the details
+        download_state[chat_id] = {
+            'url': url,
+            'file_name': file_name,
+            'file_size': file_size_display
+        }
 
         keyboard = [
-            [InlineKeyboardButton("Download", callback_data='download'),
-             InlineKeyboardButton("Rename & Download", callback_data='rename')]
+            [InlineKeyboardButton("Download", callback_data='download')],
+            [InlineKeyboardButton("Cancel", callback_data='cancel')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
+
         await update.message.reply_text(
-            f"📤 How would you like to upload this link?\n"
-            f"Name: {file_name}\n"
-            f"Size: {file_size_mb:.2f} MB",
+            f"📤 File Info:\nName: {file_name}\nSize: {file_size_display}",
             reply_markup=reply_markup
         )
-
     except requests.RequestException as e:
         await update.message.reply_text(f"Failed to get file info: {str(e)}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle inline button clicks."""
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat.id
     data = query.data
 
     if chat_id not in download_state:
-        await query.edit_message_text("No download session found. Please send a new URL.")
+        await query.edit_message_text("No active download found. Please send a new URL.")
         return
 
     if data == 'download':
-        download_state[chat_id]['confirm'] = True
-        await query.edit_message_text("Confirm download? (Yes/No)")
-    elif data == 'rename':
-        download_state[chat_id]['rename'] = True
-        await query.edit_message_text("Enter new file name:")
+        message = await query.edit_message_text("Downloading... Please wait.")
+        download_state[chat_id]['cancel'] = False  # Reset cancel flag
+        await download_and_process(chat_id, context, message)
 
-async def handle_response(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle user responses after button clicks."""
-    chat_id = update.effective_chat.id
-    message_text = update.message.text.strip()
+    elif data == 'cancel':
+        download_state[chat_id]['cancel'] = True  # Mark as canceled
+        await query.edit_message_text("🚫 Download canceled.")
 
-    if chat_id in download_state:
-        if 'confirm' in download_state[chat_id]:
-            if message_text.lower() == 'yes':
-                await update.message.reply_text("Starting download...")
-                await download_and_process(chat_id, context)
-            elif message_text.lower() == 'no':
-                await update.message.reply_text("Download cancelled.")
-            del download_state[chat_id]['confirm']
-
-        elif 'rename' in download_state[chat_id]:
-            download_state[chat_id]['file_name'] = message_text + '.zip'
-            await update.message.reply_text(f"Renamed to {message_text}.zip. Confirm download? (Yes/No)")
-            download_state[chat_id]['confirm'] = True
-            del download_state[chat_id]['rename']
-
-async def download_and_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Download the file and process it with progress updates."""
+async def download_and_process(chat_id: int, context: ContextTypes.DEFAULT_TYPE, message) -> None:
     state = download_state[chat_id]
     url = state['url']
     rom_filename = os.path.join(WORKING_DIR, state['file_name'])
 
     try:
+        start_time = time.time()
         response = requests.get(url, stream=True)
-        response.raise_for_status()
-        total_size = state['file_size']
-        chunk_size = 8192
+        total_size = int(response.headers.get('content-length', 0))
         downloaded_size = 0
+        chunk_size = 1024 * 1024  # 1 MB
+        last_percentage = 0
 
         with open(rom_filename, 'wb') as f:
-            start_time = time.time()
-            last_update_time = 0
-
             for chunk in response.iter_content(chunk_size=chunk_size):
-                if chunk:
-                    f.write(chunk)
-                    downloaded_size += len(chunk)
-                    state['downloaded'] = downloaded_size
+                if download_state.get(chat_id, {}).get('cancel', False):  
+                    await message.edit_text("🚫 Download canceled.")
+                    os.remove(rom_filename)  # Delete incomplete file
+                    return  
 
-                    percentage = (downloaded_size / total_size) * 100 if total_size else 0
-                    elapsed_time = time.time() - start_time
-                    speed = downloaded_size / elapsed_time / (1024 * 1024) if elapsed_time else 0
-                    eta = ((total_size - downloaded_size) / (speed * 1024 * 1024)) if speed else 0
+                f.write(chunk)
+                downloaded_size += len(chunk)
 
-                    if elapsed_time - last_update_time >= 2:  # Update every 2 seconds
-                        last_update_time = elapsed_time
-                        progress_msg = (
-                            f"Downloading: {percentage:.2f}%\n"
-                            f"Speed: {speed:.2f} MB/sec\n"
-                            f"ETA: {eta:.0f}s"
-                        )
+                percentage = (downloaded_size / total_size) * 100 if total_size else 0
+                speed = downloaded_size / (time.time() - start_time)
+                time_remaining = (total_size - downloaded_size) / speed if speed > 0 else 0
 
-                        if 'progress_msg_id' in state:
-                            await context.bot.edit_message_text(
-                                chat_id=chat_id,
-                                message_id=state['progress_msg_id'],
-                                text=progress_msg
-                            )
-                        else:
-                            msg = await context.bot.send_message(chat_id=chat_id, text=progress_msg)
-                            state['progress_msg_id'] = msg.message_id
+                time_remaining_display = f"{time_remaining:.0f} sec" if time_remaining < 60 else f"{time_remaining / 60:.1f} min"
 
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=state['progress_msg_id'],
-                text="Download completed!"
-            )
-            del state['progress_msg_id']
+                progress_bar = "[" + "▪" * int(percentage // 10) + "▫" * (10 - int(percentage // 10)) + "]"
+                file_size_display = f"{total_size / (1024 * 1024):.2f} MB" if total_size < (1024 * 1024 * 1024) else f"{total_size / (1024 * 1024 * 1024):.2f} GB"
+                
+           
+                if int(percentage) > last_percentage:
+                    last_percentage = int(percentage)
+                    await message.edit_text(
+                        f"Downloading: {percentage:.2f}%\n{progress_bar}\n"
+                        f"{downloaded_size / (1024 * 1024):.2f} MB of {file_size_display}\n"
+                        f"Speed: {speed / (1024 * 1024):.2f} MB/sec\n"
+                        f"Time left: {time_remaining_display}",
+                       
+                    )
+        time_taken = time.time() - start_time
+        minutes = int(time_taken // 60)  # Get full minutes
+        seconds = int(time_taken % 60)   # Get remaining seconds
 
-            boot_img_path = await extract_boot_img(rom_filename, chat_id, context)
-            if boot_img_path:
-                await send_boot_img(boot_img_path, chat_id, context)
+        await message.edit_text(f"Download completed in {minutes} min {seconds} sec!")
+        boot_img_path = await extract_boot_img(rom_filename, chat_id, context)
+        if boot_img_path:
+            await send_boot_img(boot_img_path, chat_id, context)
+            await context.bot.send_message(chat_id, f"✅ Process completed ")
 
-            end_time = time.time()
-            time_taken = end_time - start_time
-            await context.bot.send_message(chat_id, f"Process completed in {time_taken:.2f} seconds!")
-
-            cleanup_files(rom_filename, boot_img_path)
 
     except requests.RequestException as e:
-        await context.bot.send_message(chat_id, f"Failed to download the file: {str(e)}")
+        await message.edit_text(f"❌ Failed to download the file: {str(e)}")
+
     finally:
-        download_state.pop(chat_id, None)
+        download_state.pop(chat_id, None)  # Clean up after completion or cancellation
 
 async def extract_boot_img(rom_path: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Extract the boot.img file from the Fastboot ROM."""
     try:
-        with zipfile.ZipFile(rom_path, 'r') as zip_ref:
-            for file in zip_ref.namelist():
+        with tarfile.open(rom_path, 'r:gz') as tar_ref:
+            boot_img_found = False
+            for file in tar_ref.getnames():
                 if file.endswith("boot.img"):
-                    zip_ref.extract(file, WORKING_DIR)
-                    boot_img_path = os.path.join(WORKING_DIR, file)
-                    await context.bot.send_message(chat_id, "Extracted boot.img successfully.")
+                    tar_ref.extract(file, WORKING_DIR)  # Extract directly to WORKING_DIR
+                    boot_img_path = os.path.join(WORKING_DIR, os.path.basename(file))
+                    boot_img_found = True
+                    await context.bot.send_message(chat_id, "✅ Extracted boot.img successfully.")
                     return boot_img_path
-            await context.bot.send_message(chat_id, "No boot.img found in the ROM.")
-            return None
-    except zipfile.BadZipFile:
-        await context.bot.send_message(chat_id, "The downloaded file is not a valid ZIP.")
+            if not boot_img_found:
+                await context.bot.send_message(chat_id, "❌ No boot.img found in the ROM.")
+                return None
+    except tarfile.TarError:
+        await context.bot.send_message(chat_id, "❌ The downloaded file is not a valid TGZ.")
         return None
 
 async def send_boot_img(boot_img_path: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send the extracted boot.img file to the user."""
-    with open(boot_img_path, 'rb') as f:
-        await context.bot.send_document(chat_id=chat_id, document=f, filename="boot.img")
+    zip_path = boot_img_path + ".zip"
+    
+    # Convert boot.img into a ZIP file
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        zipf.write(boot_img_path, "boot.img")
+
+    file_size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+
+    if file_size_mb < 50:
+        with open(zip_path, 'rb') as f:
+            await context.bot.send_document(chat_id=chat_id, document=f, filename="boot.zip")
+            os.remove(boot_img_path)  # After extraction
+            os.remove(zip_path)      # After sending/uploading
+    else:
+        temp_url = await upload_to_temp(zip_path)
+        await context.bot.send_message(chat_id, f"Download boot.zip here: {temp_url}")
+
+
+
+
+async def upload_to_temp(file_path: str) -> str:
+    for attempt in range(3):  # Retry 3 times
+        try:
+            with open(file_path, 'rb') as file:
+                files = {'file': file}
+                response = await asyncio.to_thread(requests.post, "https://tmpfiles.org/api/v1/upload", files=files)
+                response.raise_for_status()
+                return response.json().get("data", {}).get("url", "Failed to generate link")
+        except requests.RequestException as e:
+            if attempt == 2:  # Last attempt
+                return f"Upload failed after retries: {str(e)}"
+            await asyncio.sleep(2)  # Wait before retrying
+    return "Failed to generate link"
+
+
+async def show_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    files = os.listdir(WORKING_DIR)
+
+    if files:
+        file_list = "\n".join([f"{i + 1}) {file}" for i, file in enumerate(files)])
+        message = (
+            "------------------------\n"
+            "\t📂<b> Total Files </b>\n"
+            "------------------------\n"
+            f"<i>{file_list}</i>"
+        )
+    else:
+        message = (
+            "------------------------\n"
+            "\t📂<b> Total Files </b>\n"
+            "------------------------\n"
+            "No files found."
+        )
+
+    await update.message.reply_text(f"<pre>{message}</pre>", parse_mode="HTML")
+
+async def delete_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if os.path.exists(WORKING_DIR):
+        shutil.rmtree(WORKING_DIR)  # Delete the folder and all contents
+        os.makedirs(WORKING_DIR)  # Recreate the empty folder
+        await update.message.reply_text(f"🗑️ All files in {WORKING_DIR} have been deleted.")
+    else:
+        await update.message.reply_text("❌ Directory not found.")
+
 
 def main() -> None:
-    """Run the bot."""
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("download", download_file))
+    application.add_handler(CommandHandler("showfiles", show_files))
+    application.add_handler(CommandHandler("deletefiles", delete_files))
     application.add_handler(CallbackQueryHandler(button_handler))
+
+    # Handle URL **only if the user previously used /download**
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+
     application.run_polling()
 
 if __name__ == '__main__':
