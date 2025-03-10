@@ -6,7 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 
 # Replace 'YOUR_BOT_TOKEN' with the token from BotFather
-TOKEN = 'YOUR_BOT_TOKEN'
+TOKEN = '7469030708:AAHu8ZEaYbGnAeTEoley1FB8XSg7NEPakWw'
 
 # Directory to store temporary files
 WORKING_DIR = "temp_files"
